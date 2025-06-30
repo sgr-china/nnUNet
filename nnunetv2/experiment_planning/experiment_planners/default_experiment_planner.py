@@ -8,7 +8,7 @@ from batchgenerators.utilities.file_and_folder_operations import load_json, join
 from dynamic_network_architectures.architectures.unet import PlainConvUNet
 from dynamic_network_architectures.building_blocks.helper import convert_dim_to_conv_op, get_matching_instancenorm
 
-from nnunetv2.configuration import ANISO_THRESHOLD
+from nnunetv2.configuration import ANISO_THRESHOLD # 各向异性阈值常量
 from nnunetv2.experiment_planning.experiment_planners.network_topology import get_pool_and_conv_props
 from nnunetv2.imageio.reader_writer_registry import determine_reader_writer_from_dataset_json
 from nnunetv2.paths import nnUNet_raw, nnUNet_preprocessed
@@ -30,6 +30,14 @@ class ExperimentPlanner(object):
         """
         overwrite_target_spacing only affects 3d_fullres! (but by extension 3d_lowres which starts with fullres may
         also be affected
+        实验规划器初始化
+        参数:
+            dataset_name_or_id: 数据集名称或ID
+            gpu_memory_target_in_gb: 目标GPU内存(GB)
+            preprocessor_name: 预处理器名称
+            plans_name: 计划文件名
+            overwrite_target_spacing: 覆盖目标间距（仅影响3d_fullres）
+            suppress_transpose: 是否禁止转置
         """
 
         self.dataset_name = maybe_convert_to_dataset_name(dataset_name_or_id)
@@ -42,35 +50,39 @@ class ExperimentPlanner(object):
         # load dataset fingerprint
         if not isfile(join(preprocessed_folder, 'dataset_fingerprint.json')):
             raise RuntimeError('Fingerprint missing for this dataset. Please run nnUNet_extract_dataset_fingerprint')
-
+        # 加载数据集指纹（统计信息）
         self.dataset_fingerprint = load_json(join(preprocessed_folder, 'dataset_fingerprint.json'))
 
         self.anisotropy_threshold = ANISO_THRESHOLD
-
-        self.UNet_base_num_features = 32
-        self.UNet_class = PlainConvUNet
+        # 网络基础参数配置
+        self.UNet_base_num_features = 32  # 基础特征数
+        self.UNet_class = PlainConvUNet  # 使用的UNet类
         # the following two numbers are really arbitrary and were set to reproduce nnU-Net v1's configurations as
         # much as possible
+        # 3D/2D参考值（用于计算目标batch size）
         self.UNet_reference_val_3d = 560000000  # 455600128  550000000
         self.UNet_reference_val_2d = 85000000  # 83252480
         self.UNet_reference_com_nfeatures = 32
         self.UNet_reference_val_corresp_GB = 8
-        self.UNet_reference_val_corresp_bs_2d = 12
-        self.UNet_reference_val_corresp_bs_3d = 2
-        self.UNet_featuremap_min_edge_length = 4
+        self.UNet_reference_val_corresp_bs_2d = 12  # 2D参考batch size
+        self.UNet_reference_val_corresp_bs_3d = 2  # 3D参考batch size
+        self.UNet_featuremap_min_edge_length = 4  # 特征图最小边长
+        # 编码器/解码器每阶段块数
         self.UNet_blocks_per_stage_encoder = (2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2)
         self.UNet_blocks_per_stage_decoder = (2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2)
-        self.UNet_min_batch_size = 2
+        self.UNet_min_batch_size = 2  # 最小batch size
+        # # 2D/3D最大特征数
         self.UNet_max_features_2d = 512
         self.UNet_max_features_3d = 320
-        self.max_dataset_covered = 0.05 # we limit the batch size so that no more than 5% of the dataset can be seen
+        # 单次前向/反向传播最大数据覆盖率
+        self.max_dataset_covered = 0.05  # we limit the batch size so that no more than 5% of the dataset can be seen
         # in a single forward/backward pass
-
+        # GPU内存目标
         self.UNet_vram_target_GB = gpu_memory_target_in_gb
-
+        # 低分辨率创建阈值（当全分辨率patch size小于中位形状的25%时需创建低分辨率配置）
         self.lowres_creation_threshold = 0.25  # if the patch size of fullres is less than 25% of the voxels in the
         # median shape then we need a lowres config as well
-
+        # 预处理和计划标识符
         self.preprocessor_name = preprocessor_name
         self.plans_identifier = plans_name
         self.overwrite_target_spacing = overwrite_target_spacing
@@ -79,9 +91,9 @@ class ExperimentPlanner(object):
                                                                                   'given (as list or tuple)'
         assert overwrite_target_spacing is None or all([isinstance(i, float) for i in overwrite_target_spacing]), \
             'if overwrite_target_spacing is used then three floats must be given (as list or tuple)'
-
+        # 存储最终计划的容器
         self.plans = None
-
+        # 如果存在分割文件则复制到预处理目录
         if isfile(join(self.raw_dataset_folder, 'splits_final.json')):
             _maybe_copy_splits_file(join(self.raw_dataset_folder, 'splits_final.json'),
                                     join(preprocessed_folder, 'splits_final.json'))
@@ -99,14 +111,27 @@ class ExperimentPlanner(object):
                                    arch_kwargs_req_import: Tuple[str, ...]):
         """
         Works for PlainConvUNet, ResidualEncoderUNet
+        静态估计VRAM使用量
+        参数:
+            patch_size: 输入图像块大小
+            input_channels: 输入通道数
+            output_channels: 输出通道数
+            arch_class_name: 架构类名
+            arch_kwargs: 架构参数字典
+            arch_kwargs_req_import: 需要导入的关键字
+        返回:
+            估计的VRAM使用量（字节）
         """
+        # 临时调整线程数以加速计算
         a = torch.get_num_threads()
         torch.set_num_threads(get_allowed_n_proc_DA())
         # print(f'instantiating network, patch size {patch_size}, pool op: {arch_kwargs["strides"]}')
+        # 实例化网络并计算卷积特征图大小
         net = get_network_from_plans(arch_class_name, arch_kwargs, arch_kwargs_req_import, input_channels,
                                      output_channels,
                                      allow_init=False)
         ret = net.compute_conv_feature_map_size(patch_size)
+        # 恢复原始线程数
         torch.set_num_threads(a)
         return ret
 
@@ -117,6 +142,13 @@ class ExperimentPlanner(object):
 
         determine_resampling is called within get_plans_for_configuration to allow for different functions for each
         configuration
+        默认使用相同的重采样函数，但参数不同
+        确定重采样函数和参数
+        返回:
+            data_resampling_fn: 数据重采样函数
+            data_resampling_kwargs: 数据重采样参数
+            seg_resampling_fn: 分割标签重采样函数
+            seg_resampling_kwargs: 分割标签重采样参数
         """
         resampling_data = resample_data_or_seg_to_shape
         resampling_data_kwargs = {
@@ -142,6 +174,11 @@ class ExperimentPlanner(object):
         determine_segmentation_softmax_export_fn is called within get_plans_for_configuration to allow for different
         functions for each configuration
 
+        确定softmax输出重采样函数
+        返回:
+            resampling_fn: 重采样函数
+            resampling_kwargs: 重采样参数
+
         """
         resampling_fn = resample_data_or_seg_to_shape
         resampling_fn_kwargs = {
@@ -161,31 +198,35 @@ class ExperimentPlanner(object):
         (for example ACDC with (10, 1.5, 1.5)). These datasets still have examples with a spacing of 5 or 6 mm in the low
         resolution axis. Choosing the median here will result in bad interpolation artifacts that can substantially
         impact performance (due to the low number of slices).
+        确定全分辨率目标间距（使用各向异性处理）
+        返回:
+            目标间距数组
         """
         if self.overwrite_target_spacing is not None:
             return np.array(self.overwrite_target_spacing)
-
+        # 从指纹数据获取所有间距和裁剪后形状
         spacings = np.vstack(self.dataset_fingerprint['spacings'])
         sizes = self.dataset_fingerprint['shapes_after_crop']
-
+        # 计算间距的中位数（50%百分位）
         target = np.percentile(spacings, 50, 0)
 
         # todo sizes_after_resampling = [compute_new_shape(j, i, target) for i, j in zip(spacings, sizes)]
-
+        # 计算形状的中位数
         target_size = np.percentile(np.vstack(sizes), 50, 0)
         # we need to identify datasets for which a different target spacing could be beneficial. These datasets have
         # the following properties:
         # - one axis which much lower resolution than the others
         # - the lowres axis has much less voxels than the others
         # - (the size in mm of the lowres axis is also reduced)
+        # 识别具有显著各向异性的轴
         worst_spacing_axis = np.argmax(target)
         other_axes = [i for i in range(len(target)) if i != worst_spacing_axis]
         other_spacings = [target[i] for i in other_axes]
         other_sizes = [target_size[i] for i in other_axes]
-
+        # 检查是否满足各向异性条件
         has_aniso_spacing = target[worst_spacing_axis] > (self.anisotropy_threshold * max(other_spacings))
         has_aniso_voxels = target_size[worst_spacing_axis] * self.anisotropy_threshold < min(other_sizes)
-
+        # 如果满足各向异性条件，调整目标间距
         if has_aniso_spacing and has_aniso_voxels:
             spacings_of_that_axis = spacings[:, worst_spacing_axis]
             target_spacing_of_that_axis = np.percentile(spacings_of_that_axis, 10)
@@ -196,6 +237,7 @@ class ExperimentPlanner(object):
         return target
 
     def determine_normalization_scheme_and_whether_mask_is_used_for_norm(self) -> Tuple[List[str], List[bool]]:
+        """确定每个通道的归一化方案和是否使用掩码"""
         if 'channel_names' not in self.dataset_json.keys():
             print('WARNING: "modalities" should be renamed to "channel_names" in dataset.json. This will be '
                   'enforced soon!')
@@ -213,6 +255,7 @@ class ExperimentPlanner(object):
         return normalization_schemes, use_nonzero_mask_for_norm
 
     def determine_transpose(self):
+        """确定数据转置顺序（将最大间距轴放在最后）"""
         if self.suppress_transpose:
             return [0, 1, 2], [0, 1, 2]
 
@@ -226,28 +269,36 @@ class ExperimentPlanner(object):
         return transpose_forward, transpose_backward
 
     def get_plans_for_configuration(self,
-                                    spacing: Union[np.ndarray, Tuple[float, ...], List[float]],
-                                    median_shape: Union[np.ndarray, Tuple[int, ...]],
+                                    spacing: Union[np.ndarray, Tuple[float, ...], List[float]],  # 目标间距
+                                    median_shape: Union[np.ndarray, Tuple[int, ...]],  # 中位形状
                                     data_identifier: str,
-                                    approximate_n_voxels_dataset: float,
+                                    approximate_n_voxels_dataset: float,  # 数据集总体素数
                                     _cache: dict) -> dict:
+        """为特定配置生成计划"""
+
+        # 内部函数：计算每阶段特征数
         def _features_per_stage(num_stages, max_num_features) -> Tuple[int, ...]:
             return tuple([min(max_num_features, self.UNet_base_num_features * 2 ** i) for
                           i in range(num_stages)])
 
+        # 内部函数：生成缓存键
         def _keygen(patch_size, strides):
             return str(patch_size) + '_' + str(strides)
 
         assert all([i > 0 for i in spacing]), f"Spacing must be > 0! Spacing: {spacing}"
+        # 1. 确定输入通道数
         num_input_channels = len(self.dataset_json['channel_names'].keys()
                                  if 'channel_names' in self.dataset_json.keys()
                                  else self.dataset_json['modality'].keys())
+        # 2. 根据维度确定最大特征数
         max_num_features = self.UNet_max_features_2d if len(spacing) == 2 else self.UNet_max_features_3d
+        # 3. 根据维度确定卷积类型（2D/3D）
         unet_conv_op = convert_dim_to_conv_op(len(spacing))
 
         # print(spacing, median_shape, approximate_n_voxels_dataset)
         # find an initial patch size
         # we first use the spacing to get an aspect ratio
+        # 4. 计算初始patch size（基于间距和参考体积）
         tmp = 1 / np.array(spacing)
 
         # we then upscale it so that it initially is certainly larger than what we need (rescale to have the same
@@ -265,16 +316,18 @@ class ExperimentPlanner(object):
         # clip initial patch size to median_shape. It makes little sense to have it be larger than that. Note that
         # this is different from how nnU-Net v1 does it!
         # todo patch size can still get too large because we pad the patch size to a multiple of 2**n
+        # 5. 裁剪初始patch size不超过中位形状
         initial_patch_size = np.array([min(i, j) for i, j in zip(initial_patch_size, median_shape[:len(spacing)])])
 
         # use that to get the network topology. Note that this changes the patch_size depending on the number of
         # pooling operations (must be divisible by 2**num_pool in each axis)
+        # 6. 计算网络拓扑（池化次数、卷积核大小等）
         network_num_pool_per_axis, pool_op_kernel_sizes, conv_kernel_sizes, patch_size, \
         shape_must_be_divisible_by = get_pool_and_conv_props(spacing, initial_patch_size,
                                                              self.UNet_featuremap_min_edge_length,
                                                              999999)
-        num_stages = len(pool_op_kernel_sizes)
-
+        num_stages = len(pool_op_kernel_sizes)  # 网络阶段数
+        # 7. 构建网络架构参数
         norm = get_matching_instancenorm(unet_conv_op)
         architecture_kwargs = {
             'network_class_name': self.UNet_class.__module__ + '.' + self.UNet_class.__name__,
@@ -298,6 +351,7 @@ class ExperimentPlanner(object):
         }
 
         # now estimate vram consumption
+        # 8. 估计VRAM使用量（使用缓存避免重复计算）
         if _keygen(patch_size, pool_op_kernel_sizes) in _cache.keys():
             estimate = _cache[_keygen(patch_size, pool_op_kernel_sizes)]
         else:
@@ -312,16 +366,20 @@ class ExperimentPlanner(object):
 
         # how large is the reference for us here (batch size etc)?
         # adapt for our vram target
+        # 9. 调整batch size以满足GPU内存限制
+        # 算参考值（基于目标GPU内存）
         reference = (self.UNet_reference_val_2d if len(spacing) == 2 else self.UNet_reference_val_3d) * \
                     (self.UNet_vram_target_GB / self.UNet_reference_val_corresp_GB)
 
         ref_bs = self.UNet_reference_val_corresp_bs_2d if len(spacing) == 2 else self.UNet_reference_val_corresp_bs_3d
         # we enforce a batch size of at least two, reference values may have been computed for different batch sizes.
         # Correct for that in the while loop if statement
+        # 循环缩小patch size直到满足内存限制
         while (estimate / ref_bs * 2) > reference:
             # print(patch_size, estimate, reference)
             # patch size seems to be too large, so we need to reduce it. Reduce the axis that currently violates the
             # aspect ratio the most (that is the largest relative to median shape)
+            # 找出超出比例最大的轴
             axis_to_be_reduced = np.argsort([i / j for i, j in zip(patch_size, median_shape[:len(spacing)])])[-1]
 
             # we cannot simply reduce that axis by shape_must_be_divisible_by[axis_to_be_reduced] because this
@@ -330,9 +388,11 @@ class ExperimentPlanner(object):
             # (224 / 2**5 = 7; 7 < 2 * self.UNet_featuremap_min_edge_length(4) so it's valid). So we need to first
             # subtract shape_must_be_divisible_by, then recompute it and then subtract the
             # recomputed shape_must_be_divisible_by. Annoying.
+            # 减小该轴尺寸（考虑整除约束）
             patch_size = list(patch_size)
             tmp = deepcopy(patch_size)
             tmp[axis_to_be_reduced] -= shape_must_be_divisible_by[axis_to_be_reduced]
+            # 重新计算拓扑
             _, _, _, _, shape_must_be_divisible_by = \
                 get_pool_and_conv_props(spacing, tmp,
                                         self.UNet_featuremap_min_edge_length,
@@ -340,6 +400,7 @@ class ExperimentPlanner(object):
             patch_size[axis_to_be_reduced] -= shape_must_be_divisible_by[axis_to_be_reduced]
 
             # now recompute topology
+            # 更新网络参数
             network_num_pool_per_axis, pool_op_kernel_sizes, conv_kernel_sizes, patch_size, \
             shape_must_be_divisible_by = get_pool_and_conv_props(spacing, patch_size,
                                                                  self.UNet_featuremap_min_edge_length,
@@ -354,6 +415,7 @@ class ExperimentPlanner(object):
                 'n_conv_per_stage': self.UNet_blocks_per_stage_encoder[:num_stages],
                 'n_conv_per_stage_decoder': self.UNet_blocks_per_stage_decoder[:num_stages - 1],
             })
+            # 重新估计VRAM
             if _keygen(patch_size, pool_op_kernel_sizes) in _cache.keys():
                 estimate = _cache[_keygen(patch_size, pool_op_kernel_sizes)]
             else:
@@ -369,36 +431,38 @@ class ExperimentPlanner(object):
 
         # alright now let's determine the batch size. This will give self.UNet_min_batch_size if the while loop was
         # executed. If not, additional vram headroom is used to increase batch size
+        # 10. 计算最终batch size（考虑数据集覆盖限制）
         batch_size = round((reference / estimate) * ref_bs)
 
         # we need to cap the batch size to cover at most 5% of the entire dataset. Overfitting precaution. We cannot
         # go smaller than self.UNet_min_batch_size though
+        # 计算覆盖5%数据集的最大batch size
         bs_corresponding_to_5_percent = round(
             approximate_n_voxels_dataset * self.max_dataset_covered / np.prod(patch_size, dtype=np.float64))
         batch_size = max(min(batch_size, bs_corresponding_to_5_percent), self.UNet_min_batch_size)
-
+        #  11. 获取重采样和归一化方案
         resampling_data, resampling_data_kwargs, resampling_seg, resampling_seg_kwargs = self.determine_resampling()
         resampling_softmax, resampling_softmax_kwargs = self.determine_segmentation_softmax_export_fn()
 
         normalization_schemes, mask_is_used_for_norm = \
             self.determine_normalization_scheme_and_whether_mask_is_used_for_norm()
-
+        # 12. 构建配置计划字典
         plan = {
             'data_identifier': data_identifier,
             'preprocessor_name': self.preprocessor_name,
             'batch_size': batch_size,
-            'patch_size': patch_size,
-            'median_image_size_in_voxels': median_shape,
-            'spacing': spacing,
-            'normalization_schemes': normalization_schemes,
-            'use_mask_for_norm': mask_is_used_for_norm,
-            'resampling_fn_data': resampling_data.__name__,
-            'resampling_fn_seg': resampling_seg.__name__,
-            'resampling_fn_data_kwargs': resampling_data_kwargs,
-            'resampling_fn_seg_kwargs': resampling_seg_kwargs,
-            'resampling_fn_probabilities': resampling_softmax.__name__,
-            'resampling_fn_probabilities_kwargs': resampling_softmax_kwargs,
-            'architecture': architecture_kwargs
+            'patch_size': patch_size,  # 最终确定的patch size
+            'median_image_size_in_voxels': median_shape,  # 中位形状
+            'spacing': spacing,  # 目标间距
+            'normalization_schemes': normalization_schemes,  # 各通道归一化方案
+            'use_mask_for_norm': mask_is_used_for_norm,  # 是否使用掩码
+            'resampling_fn_data': resampling_data.__name__,  # 数据重采样函数名
+            'resampling_fn_seg': resampling_seg.__name__,  # 分割重采样函数名
+            'resampling_fn_data_kwargs': resampling_data_kwargs,  # 数据重采样参数
+            'resampling_fn_seg_kwargs': resampling_seg_kwargs,  # 分割重采样参数
+            'resampling_fn_probabilities': resampling_softmax.__name__,  # softmax重采样函数名
+            'resampling_fn_probabilities_kwargs': resampling_softmax_kwargs,  # softmax重采样参数
+            'architecture': architecture_kwargs  # 网络架构参数
         }
         return plan
 

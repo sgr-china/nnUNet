@@ -18,6 +18,10 @@ import os
 PLEASE READ documentation/setting_up_paths.md FOR INFORMATION TO HOW TO SET THIS UP
 """
 
+os.environ['nnUNet_raw'] = '/home/dataset/nnUNet_raw'
+os.environ['nnUNet_preprocessed'] = '/home/dataset/nnUNet_preprocessed'
+os.environ['nnUNet_results'] = '/home/dataset/nnUNet_results'
+
 nnUNet_raw = os.environ.get('nnUNet_raw')
 nnUNet_preprocessed = os.environ.get('nnUNet_preprocessed')
 nnUNet_results = os.environ.get('nnUNet_results')

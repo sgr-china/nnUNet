@@ -57,6 +57,9 @@ def create_lists_from_splitted_dataset_folder(folder: str, file_ending: str, ide
 
 
 def get_filenames_of_train_images_and_targets(raw_dataset_folder: str, dataset_json: dict = None):
+    """
+    获取训练图像和标签文件名
+    """
     if dataset_json is None:
         dataset_json = load_json(join(raw_dataset_folder, 'dataset.json'))
 
