@@ -55,6 +55,7 @@ def plan_experiment_dataset(dataset_id: int,
                             overwrite_plans_name: Optional[str] = None) -> Tuple[dict, str]:
     """
     overwrite_target_spacing ONLY applies to 3d_fullres and 3d_cascade fullres!
+    为指定数据集生成计划
     """
     kwargs = {}
     if overwrite_plans_name is not None:

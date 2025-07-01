@@ -476,26 +476,31 @@ class ExperimentPlanner(object):
 
         So for now if you want a different transpose_forward/backward you need to create a new planner. Also not too
         hard.
+        主函数：生成完整的实验计划
         """
         # we use this as a cache to prevent having to instantiate the architecture too often. Saves computation time
         _tmp = {}
 
         # first get transpose
+        # 1. 确定转置顺序
         transpose_forward, transpose_backward = self.determine_transpose()
 
         # get fullres spacing and transpose it
+        # 2. 获取全分辨率间距并转置
         fullres_spacing = self.determine_fullres_target_spacing()
         fullres_spacing_transposed = fullres_spacing[transpose_forward]
 
         # get transposed new median shape (what we would have after resampling)
+        # 3. 计算转置后的新形状
         new_shapes = [compute_new_shape(j, i, fullres_spacing) for i, j in
                       zip(self.dataset_fingerprint['spacings'], self.dataset_fingerprint['shapes_after_crop'])]
         new_median_shape = np.median(new_shapes, 0)
         new_median_shape_transposed = new_median_shape[transpose_forward]
-
+        # 4. 计算数据集总素数量
         approximate_n_voxels_dataset = float(np.prod(new_median_shape_transposed, dtype=np.float64) *
                                              self.dataset_json['numTraining'])
         # only run 3d if this is a 3d dataset
+        # 5.1 3D全分辨率配置
         if new_median_shape_transposed[0] != 1:
             plan_3d_fullres = self.get_plans_for_configuration(fullres_spacing_transposed,
                                                                new_median_shape_transposed,
@@ -505,22 +510,26 @@ class ExperimentPlanner(object):
             patch_size_fullres = plan_3d_fullres['patch_size']
             median_num_voxels = np.prod(new_median_shape_transposed, dtype=np.float64)
             num_voxels_in_patch = np.prod(patch_size_fullres, dtype=np.float64)
-
+            # 5.2 3D低分辨率配置（如果需要）
             plan_3d_lowres = None
             lowres_spacing = deepcopy(plan_3d_fullres['spacing'])
 
-            spacing_increase_factor = 1.03  # used to be 1.01 but that is slow with new GPU memory estimation!
+            spacing_increase_factor = 1.03  # used to be 1.01 but that is slow with new GPU memory estimation! 间距增加因子
+            # 检查是否需要低分辨率配置（当全分辨率patch size过小时）
             while num_voxels_in_patch / median_num_voxels < self.lowres_creation_threshold:
                 # we incrementally increase the target spacing. We start with the anisotropic axis/axes until it/they
                 # is/are similar (factor 2) to the other ax(i/e)s.
+                # 增加各向异性轴的间距
                 max_spacing = max(lowres_spacing)
                 if np.any((max_spacing / lowres_spacing) > 2):
                     lowres_spacing[(max_spacing / lowres_spacing) > 2] *= spacing_increase_factor
                 else:
                     lowres_spacing *= spacing_increase_factor
+                # 计算低分辨率的中位形状
                 median_num_voxels = np.prod(plan_3d_fullres['spacing'] / lowres_spacing * new_median_shape_transposed,
                                             dtype=np.float64)
                 # print(lowres_spacing)
+                # 生成低分辨率计划
                 plan_3d_lowres = self.get_plans_for_configuration(lowres_spacing,
                                                                   tuple([round(i) for i in plan_3d_fullres['spacing'] /
                                                                          lowres_spacing * new_median_shape_transposed]),
@@ -547,11 +556,12 @@ class ExperimentPlanner(object):
             plan_3d_lowres = None
 
         # 2D configuration
-        plan_2d = self.get_plans_for_configuration(fullres_spacing_transposed[1:],
+        # 5.3 2D配置
+        plan_2d = self.get_plans_for_configuration(fullres_spacing_transposed[1:],  # 忽略Z轴
                                                    new_median_shape_transposed[1:],
                                                    self.generate_data_identifier('2d'), approximate_n_voxels_dataset,
                                                    _tmp)
-        plan_2d['batch_dice'] = True
+        plan_2d['batch_dice'] = True  # 2D使用batch dice
 
         print('2D U-Net configuration:')
         print(plan_2d)
